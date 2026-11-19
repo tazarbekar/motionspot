@@ -1,0 +1,1274 @@
+name: Build Motion Spot APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Create project files
+        run: |
+          mkdir -p "$(dirname '.gitignore')"
+          cat > '.gitignore' <<'EOF'
+          .gradle/
+          build/
+          local.properties
+          .idea/
+          *.iml
+          EOF
+          mkdir -p "$(dirname 'README.md')"
+          cat > 'README.md' <<'EOF'
+          # Motion Spot
+
+          Android app: a splash screen (Khorfakkan and Fujairah drivers, created by ਤਜ਼ਰਬੇਕਾਰ), then a camera view where you draw a box. If movement is seen inside it, a Yelp siren plays.
+
+          Build: push this folder to GitHub (the included workflow builds the APK and attaches it to a Release), or open in Android Studio and run Build > Build APK.
+          Keep the app open and the phone steady while watching.
+          EOF
+          mkdir -p "$(dirname 'app/build.gradle.kts')"
+          cat > 'app/build.gradle.kts' <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.amarjeet.motionspot"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.amarjeet.motionspot"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "1.1"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              val camerax = "1.3.4"
+              implementation("androidx.camera:camera-core:$camerax")
+              implementation("androidx.camera:camera-camera2:$camerax")
+              implementation("androidx.camera:camera-lifecycle:$camerax")
+              implementation("androidx.camera:camera-view:$camerax")
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-feature
+                  android:name="android.hardware.camera"
+                  android:required="true" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_lock_idle_alarm"
+                  android:label="@string/app_name"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".SplashActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait"
+                      android:theme="@style/SplashTheme">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="false"
+                      android:screenOrientation="portrait" />
+              </application>
+          </manifest>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/BoxOverlayView.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/BoxOverlayView.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.util.AttributeSet
+          import android.view.MotionEvent
+          import android.view.View
+          import kotlin.math.max
+          import kotlin.math.min
+
+          class BoxOverlayView @JvmOverloads constructor(
+              context: Context,
+              attrs: AttributeSet? = null
+          ) : View(context, attrs) {
+
+              var box = RectF(0.2f, 0.2f, 0.8f, 0.8f)
+                  set(value) {
+                      field = value
+                      invalidate()
+                  }
+              var editable = true
+              var active = false
+              var onBoxChanged: ((RectF) -> Unit)? = null
+
+              private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+              private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeWidth = 5f
+              }
+              private var startX = 0f
+              private var startY = 0f
+              private var previousBox = RectF(0.2f, 0.2f, 0.8f, 0.8f)
+
+              private fun imageRect(): RectF {
+                  val vw = width.toFloat()
+                  val vh = height.toFloat()
+                  val aspect = 3f / 4f
+                  var w = vw
+                  var h = w / aspect
+                  if (h > vh) {
+                      h = vh
+                      w = h * aspect
+                  }
+                  val l = (vw - w) / 2f
+                  val t = (vh - h) / 2f
+                  return RectF(l, t, l + w, t + h)
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  val r = imageRect()
+                  val color = if (active) Color.parseColor("#4CAF50") else Color.parseColor("#FF5252")
+                  fillPaint.color = color
+                  fillPaint.alpha = 50
+                  strokePaint.color = color
+                  val rect = RectF(
+                      r.left + box.left * r.width(),
+                      r.top + box.top * r.height(),
+                      r.left + box.right * r.width(),
+                      r.top + box.bottom * r.height()
+                  )
+                  canvas.drawRect(rect, fillPaint)
+                  canvas.drawRect(rect, strokePaint)
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  if (!editable) return false
+                  val r = imageRect()
+                  val nx = ((e.x - r.left) / r.width()).coerceIn(0f, 1f)
+                  val ny = ((e.y - r.top) / r.height()).coerceIn(0f, 1f)
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          previousBox = RectF(box)
+                          startX = nx
+                          startY = ny
+                          box = RectF(nx, ny, nx, ny)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          box = RectF(min(startX, nx), min(startY, ny), max(startX, nx), max(startY, ny))
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          box = RectF(min(startX, nx), min(startY, ny), max(startX, nx), max(startY, ny))
+                          if (box.width() < 0.05f || box.height() < 0.05f) {
+                              box = previousBox
+                          } else {
+                              onBoxChanged?.invoke(RectF(box))
+                          }
+                      }
+                      MotionEvent.ACTION_CANCEL -> {
+                          box = previousBox
+                      }
+                  }
+                  return true
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/MainActivity.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/MainActivity.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.Manifest
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.RectF
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.util.Size
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.AdapterView
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.SeekBar
+          import android.widget.Spinner
+          import android.widget.TextView
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.camera.core.CameraSelector
+          import androidx.camera.core.ImageAnalysis
+          import androidx.camera.core.Preview
+          import androidx.camera.core.UseCase
+          import androidx.camera.core.resolutionselector.AspectRatioStrategy
+          import androidx.camera.core.resolutionselector.ResolutionSelector
+          import androidx.camera.core.resolutionselector.ResolutionStrategy
+          import androidx.camera.lifecycle.ProcessCameraProvider
+          import androidx.camera.view.PreviewView
+          import androidx.core.content.ContextCompat
+          import androidx.core.view.ViewCompat
+          import java.util.concurrent.Executors
+
+          class MainActivity : AppCompatActivity() {
+
+              private enum class State { IDLE, ARMING, WATCHING, ALARM }
+
+              private var state = State.IDLE
+
+              private lateinit var previewView: PreviewView
+              private lateinit var overlay: BoxOverlayView
+              private lateinit var status: TextView
+              private lateinit var mainButton: Button
+              private lateinit var testButton: Button
+              private lateinit var sensitivityBar: SeekBar
+              private lateinit var volumeBar: SeekBar
+              private lateinit var saverCheck: CheckBox
+              private lateinit var timerSpinner: Spinner
+              private lateinit var prefs: SharedPreferences
+              private lateinit var siren: SirenPlayer
+
+              private var cameraProvider: ProcessCameraProvider? = null
+              private var previewBound: Boolean? = null
+              private val analysisExecutor = Executors.newSingleThreadExecutor()
+              private val detector = MotionDetector()
+              private val handler = Handler(Looper.getMainLooper())
+
+              @Volatile
+              private var detecting = false
+
+              @Volatile
+              private var lastAnalysisMs = 0L
+
+              @Volatile
+              private var currentBox = RectF(0.2f, 0.2f, 0.8f, 0.8f)
+
+              private var testing = false
+
+              private val permissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                      if (granted) {
+                          startCamera()
+                      } else {
+                          status.text = "Camera permission is needed. Allow it in the app settings."
+                      }
+                  }
+
+              private val analyzer = ImageAnalysis.Analyzer { image ->
+                  try {
+                      val now = SystemClock.elapsedRealtime()
+                      if (detecting && now - lastAnalysisMs >= 200L) {
+                          lastAnalysisMs = now
+                          if (detector.analyze(image, currentBox)) {
+                              detecting = false
+                              runOnUiThread { onMotion() }
+                          }
+                      }
+                  } finally {
+                      image.close()
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  prefs = getSharedPreferences("motionspot", MODE_PRIVATE)
+                  siren = SirenPlayer(this)
+
+                  previewView = findViewById(R.id.previewView)
+                  overlay = findViewById(R.id.overlay)
+                  status = findViewById(R.id.status)
+                  mainButton = findViewById(R.id.mainButton)
+                  testButton = findViewById(R.id.testButton)
+                  sensitivityBar = findViewById(R.id.sensitivityBar)
+                  volumeBar = findViewById(R.id.volumeBar)
+                  saverCheck = findViewById(R.id.saverCheck)
+                  timerSpinner = findViewById(R.id.timerSpinner)
+
+                  previewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+
+                  sensitivityBar.progress = prefs.getInt("sens", 60)
+                  volumeBar.progress = prefs.getInt("vol", 100)
+                  saverCheck.isChecked = prefs.getBoolean("saver", true)
+                  timerSpinner.setSelection(prefs.getInt("timer", 0))
+                  detector.sensitivity = sensitivityBar.progress / 100f
+                  if (prefs.contains("bl")) {
+                      currentBox = RectF(
+                          prefs.getFloat("bl", 0.2f),
+                          prefs.getFloat("bt", 0.2f),
+                          prefs.getFloat("br", 0.8f),
+                          prefs.getFloat("bb", 0.8f)
+                      )
+                  }
+                  overlay.box = RectF(currentBox)
+
+                  sensitivityBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                          detector.sensitivity = progress / 100f
+                          prefs.edit().putInt("sens", progress).apply()
+                      }
+
+                      override fun onStartTrackingTouch(sb: SeekBar?) {}
+                      override fun onStopTrackingTouch(sb: SeekBar?) {}
+                  })
+
+                  volumeBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                          prefs.edit().putInt("vol", progress).apply()
+                      }
+
+                      override fun onStartTrackingTouch(sb: SeekBar?) {}
+                      override fun onStopTrackingTouch(sb: SeekBar?) {}
+                  })
+
+                  saverCheck.setOnCheckedChangeListener { _, checked ->
+                      prefs.edit().putBoolean("saver", checked).apply()
+                  }
+
+                  timerSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                      override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                          prefs.edit().putInt("timer", pos).apply()
+                      }
+
+                      override fun onNothingSelected(p: AdapterView<*>?) {}
+                  }
+
+                  overlay.onBoxChanged = { r ->
+                      currentBox = RectF(r)
+                      prefs.edit()
+                          .putFloat("bl", r.left)
+                          .putFloat("bt", r.top)
+                          .putFloat("br", r.right)
+                          .putFloat("bb", r.bottom)
+                          .apply()
+                      detector.reset()
+                  }
+
+                  mainButton.setOnClickListener {
+                      when (state) {
+                          State.IDLE -> beginArming()
+                          State.ARMING -> stopAll("Cancelled")
+                          State.WATCHING -> stopAll("Stopped watching")
+                          State.ALARM -> stopAll("Siren stopped")
+                      }
+                  }
+
+                  testButton.setOnClickListener { toggleTest() }
+
+                  if (hasCameraPermission()) {
+                      startCamera()
+                  } else {
+                      permissionLauncher.launch(Manifest.permission.CAMERA)
+                  }
+                  updateUi()
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  if (state == State.ARMING || state == State.WATCHING || testing) {
+                      stopAll("Watching stopped because the app left the screen. Keep the app open.")
+                  }
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  siren.stop()
+                  analysisExecutor.shutdown()
+                  super.onDestroy()
+              }
+
+              private fun hasCameraPermission(): Boolean =
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                      PackageManager.PERMISSION_GRANTED
+
+              private fun startCamera() {
+                  val future = ProcessCameraProvider.getInstance(this)
+                  future.addListener({
+                      try {
+                          cameraProvider = future.get()
+                          bindUseCases(true)
+                      } catch (e: Exception) {
+                          status.text = "Camera error: ${e.message}"
+                      }
+                  }, ContextCompat.getMainExecutor(this))
+              }
+
+              private fun bindUseCases(showPreview: Boolean) {
+                  val provider = cameraProvider ?: return
+                  if (previewBound == showPreview) return
+                  try {
+                      val analysis = ImageAnalysis.Builder()
+                          .setResolutionSelector(
+                              ResolutionSelector.Builder()
+                                  .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                                  .setResolutionStrategy(
+                                      ResolutionStrategy(
+                                          Size(640, 480),
+                                          ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                                      )
+                                  )
+                                  .build()
+                          )
+                          .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                          .build()
+                      analysis.setAnalyzer(analysisExecutor, analyzer)
+
+                      val useCases = ArrayList<UseCase>()
+                      useCases.add(analysis)
+                      if (showPreview) {
+                          val preview = Preview.Builder()
+                              .setResolutionSelector(
+                                  ResolutionSelector.Builder()
+                                      .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                                      .build()
+                              )
+                              .build()
+                          preview.setSurfaceProvider(previewView.surfaceProvider)
+                          useCases.add(preview)
+                      }
+                      provider.unbindAll()
+                      provider.bindToLifecycle(
+                          this,
+                          CameraSelector.DEFAULT_BACK_CAMERA,
+                          *useCases.toTypedArray()
+                      )
+                      previewBound = showPreview
+                  } catch (e: Exception) {
+                      status.text = "Camera error: ${e.message}"
+                  }
+              }
+
+              private fun setBrightness(value: Float) {
+                  val lp = window.attributes
+                  lp.screenBrightness = value
+                  window.attributes = lp
+              }
+
+              private fun beginArming() {
+                  if (cameraProvider == null) {
+                      status.text = "Camera not ready yet"
+                      return
+                  }
+                  if (testing) {
+                      siren.stop()
+                      testing = false
+                  }
+                  state = State.ARMING
+                  overlay.editable = false
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  updateUi()
+                  countdown(5)
+              }
+
+              private fun countdown(n: Int) {
+                  if (state != State.ARMING) return
+                  if (n <= 0) {
+                      beginWatching()
+                      return
+                  }
+                  status.text = "Starting in $n s. Move away from the area."
+                  handler.postDelayed({ countdown(n - 1) }, 1000L)
+              }
+
+              private fun beginWatching() {
+                  state = State.WATCHING
+                  detector.reset()
+                  overlay.active = true
+                  overlay.invalidate()
+                  if (saverCheck.isChecked) {
+                      bindUseCases(false)
+                      previewView.visibility = View.INVISIBLE
+                      setBrightness(0.02f)
+                  }
+                  status.text = "Watching the selected area"
+                  handler.postDelayed({
+                      if (state == State.WATCHING) detecting = true
+                  }, 1500L)
+                  val minutes = when (timerSpinner.selectedItemPosition) {
+                      1 -> 60
+                      2 -> 120
+                      3 -> 240
+                      else -> 0
+                  }
+                  if (minutes > 0) {
+                      handler.postDelayed({
+                          if (state == State.WATCHING) stopAll("Auto-stopped after the timer")
+                      }, minutes * 60_000L)
+                  }
+                  updateUi()
+              }
+
+              private fun onMotion() {
+                  if (state != State.WATCHING) return
+                  state = State.ALARM
+                  detecting = false
+                  handler.removeCallbacksAndMessages(null)
+                  setBrightness(-1f)
+                  previewView.visibility = View.VISIBLE
+                  bindUseCases(true)
+                  siren.start(volumeBar.progress.coerceAtLeast(10))
+                  status.text = "Motion detected! Siren is on."
+                  handler.postDelayed({
+                      if (state == State.ALARM) stopAll("Siren timed out after 2 minutes")
+                  }, 120_000L)
+                  updateUi()
+              }
+
+              private fun stopAll(message: String) {
+                  handler.removeCallbacksAndMessages(null)
+                  detecting = false
+                  siren.stop()
+                  testing = false
+                  state = State.IDLE
+                  setBrightness(-1f)
+                  window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  previewView.visibility = View.VISIBLE
+                  overlay.editable = true
+                  overlay.active = false
+                  overlay.invalidate()
+                  bindUseCases(true)
+                  status.text = message
+                  updateUi()
+              }
+
+              private fun toggleTest() {
+                  if (state != State.IDLE) return
+                  if (testing) {
+                      handler.removeCallbacksAndMessages(null)
+                      siren.stop()
+                      testing = false
+                      status.text = "Test stopped"
+                  } else {
+                      siren.start(volumeBar.progress.coerceAtLeast(10))
+                      testing = true
+                      status.text = "Testing siren for 4 seconds"
+                      handler.postDelayed({
+                          if (testing) {
+                              siren.stop()
+                              testing = false
+                              status.text = "Test finished"
+                              updateUi()
+                          }
+                      }, 4000L)
+                  }
+                  updateUi()
+              }
+
+              private fun updateUi() {
+                  val (label, color) = when (state) {
+                      State.IDLE -> Pair("Start watching", Color.parseColor("#2E7D32"))
+                      State.ARMING -> Pair("Cancel", Color.parseColor("#F57C00"))
+                      State.WATCHING -> Pair("Stop watching", Color.parseColor("#F57C00"))
+                      State.ALARM -> Pair("STOP SIREN", Color.parseColor("#C62828"))
+                  }
+                  mainButton.text = label
+                  ViewCompat.setBackgroundTintList(mainButton, ColorStateList.valueOf(color))
+                  testButton.text = if (testing) "Stop test" else "Test siren"
+                  testButton.isEnabled = state == State.IDLE
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/MotionDetector.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/MotionDetector.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.graphics.RectF
+          import androidx.camera.core.ImageProxy
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.min
+
+          class MotionDetector {
+
+              @Volatile
+              var sensitivity: Float = 0.6f
+
+              @Volatile
+              private var resetFlag = false
+
+              private var prev: IntArray? = null
+              private var prevKey = 0
+              private var hits = 0
+
+              fun reset() {
+                  resetFlag = true
+              }
+
+              private fun toRaw(ux: Float, uy: Float, rotation: Int): Pair<Float, Float> = when (rotation) {
+                  90 -> Pair(uy, 1f - ux)
+                  180 -> Pair(1f - ux, 1f - uy)
+                  270 -> Pair(1f - uy, ux)
+                  else -> Pair(ux, uy)
+              }
+
+              fun analyze(image: ImageProxy, box: RectF): Boolean {
+                  if (resetFlag) {
+                      resetFlag = false
+                      prev = null
+                      hits = 0
+                  }
+
+                  val w = image.width
+                  val h = image.height
+                  val rotation = image.imageInfo.rotationDegrees
+                  val plane = image.planes[0]
+                  val buf = plane.buffer
+                  val rowStride = plane.rowStride
+                  val pixStride = plane.pixelStride
+
+                  val a = toRaw(box.left, box.top, rotation)
+                  val b = toRaw(box.right, box.bottom, rotation)
+                  val rx0 = min(a.first, b.first)
+                  val rx1 = max(a.first, b.first)
+                  val ry0 = min(a.second, b.second)
+                  val ry1 = max(a.second, b.second)
+
+                  val x0 = (rx0 * w).toInt().coerceIn(1, w - 4)
+                  val x1 = (rx1 * w).toInt().coerceIn(x0 + 2, w - 2)
+                  val y0 = (ry0 * h).toInt().coerceIn(1, h - 4)
+                  val y1 = (ry1 * h).toInt().coerceIn(y0 + 2, h - 2)
+
+                  val grid = GRID
+                  val cur = IntArray(grid * grid)
+                  for (j in 0 until grid) {
+                      val y = y0 + ((y1 - y0) * (j + 0.5f) / grid).toInt()
+                      for (i in 0 until grid) {
+                          val x = x0 + ((x1 - x0) * (i + 0.5f) / grid).toInt()
+                          var sum = 0
+                          for (dy in -1..1) {
+                              for (dx in -1..1) {
+                                  val idx = (y + dy) * rowStride + (x + dx) * pixStride
+                                  sum += buf.get(idx).toInt() and 0xFF
+                              }
+                          }
+                          cur[j * grid + i] = sum / 9
+                      }
+                  }
+
+                  val key = (((x0 * 31 + y0) * 31 + x1) * 31 + y1) * 31 + w
+                  val p = prev
+                  if (p == null || key != prevKey) {
+                      prev = cur
+                      prevKey = key
+                      hits = 0
+                      return false
+                  }
+
+                  var total = 0L
+                  for (k in cur.indices) total += cur[k] - p[k]
+                  val mean = total.toFloat() / cur.size
+
+                  val s = sensitivity
+                  val pixThreshold = 40f - 25f * s
+                  val fractionThreshold = 0.10f - 0.085f * s
+
+                  var changed = 0
+                  for (k in cur.indices) {
+                      if (abs(cur[k] - p[k] - mean) > pixThreshold) changed++
+                  }
+                  prev = cur
+
+                  val fraction = changed.toFloat() / cur.size
+                  if (fraction >= fractionThreshold) hits++ else hits = 0
+                  return hits >= 2
+              }
+
+              companion object {
+                  private const val GRID = 32
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/SirenPlayer.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/SirenPlayer.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.content.Context
+          import android.media.AudioAttributes
+          import android.media.AudioFormat
+          import android.media.AudioManager
+          import android.media.AudioTrack
+          import kotlin.math.max
+          import kotlin.math.sin
+
+          class SirenPlayer(private val context: Context) {
+
+              @Volatile
+              private var running = false
+              private var savedVolume = -1
+
+              val isPlaying: Boolean
+                  get() = running
+
+              fun start(volumePercent: Int) {
+                  if (running) return
+                  val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                  try {
+                      savedVolume = am.getStreamVolume(AudioManager.STREAM_ALARM)
+                      val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+                      val target = max(1, maxVol * volumePercent / 100)
+                      am.setStreamVolume(AudioManager.STREAM_ALARM, target, 0)
+                  } catch (e: Exception) {
+                      savedVolume = -1
+                  }
+                  running = true
+                  Thread { play() }.start()
+              }
+
+              fun stop() {
+                  if (!running) return
+                  running = false
+                  if (savedVolume >= 0) {
+                      try {
+                          val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                          am.setStreamVolume(AudioManager.STREAM_ALARM, savedVolume, 0)
+                      } catch (e: Exception) {
+                      }
+                      savedVolume = -1
+                  }
+              }
+
+              private fun play() {
+                  val sampleRate = 44100
+                  val minBuf = AudioTrack.getMinBufferSize(
+                      sampleRate,
+                      AudioFormat.CHANNEL_OUT_MONO,
+                      AudioFormat.ENCODING_PCM_16BIT
+                  )
+                  val track = AudioTrack.Builder()
+                      .setAudioAttributes(
+                          AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_ALARM)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                              .build()
+                      )
+                      .setAudioFormat(
+                          AudioFormat.Builder()
+                              .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                              .setSampleRate(sampleRate)
+                              .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                              .build()
+                      )
+                      .setBufferSizeInBytes(max(minBuf, 4096) * 2)
+                      .setTransferMode(AudioTrack.MODE_STREAM)
+                      .build()
+
+                  val chunk = 1024
+                  val buffer = ShortArray(chunk)
+                  val dt = 1.0 / sampleRate
+                  var phase = 0.0
+                  var t = 0.0
+                  try {
+                      track.play()
+                      while (running) {
+                          for (i in 0 until chunk) {
+                              val f = 650.0 + 500.0 * (1.0 + sin(2.0 * Math.PI * 6.0 * t))
+                              phase += f * dt
+                              if (phase >= 1.0) phase -= 1.0
+                              buffer[i] = ((2.0 * phase - 1.0) * 29000.0).toInt().toShort()
+                              t += dt
+                          }
+                          track.write(buffer, 0, chunk)
+                      }
+                  } finally {
+                      try {
+                          track.stop()
+                      } catch (e: Exception) {
+                      }
+                      track.release()
+                  }
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/SplashActivity.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/SplashActivity.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.content.Intent
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+          import androidx.appcompat.app.AppCompatActivity
+
+          class SplashActivity : AppCompatActivity() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var launched = false
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_splash)
+                  val root = findViewById<View>(R.id.splashRoot)
+                  root.alpha = 0f
+                  root.animate().alpha(1f).setDuration(600L).start()
+                  root.setOnClickListener { openMain() }
+              }
+
+              override fun onStart() {
+                  super.onStart()
+                  handler.postDelayed({ openMain() }, 2200L)
+              }
+
+              override fun onStop() {
+                  handler.removeCallbacksAndMessages(null)
+                  super.onStop()
+              }
+
+              private fun openMain() {
+                  if (launched) return
+                  launched = true
+                  startActivity(Intent(this, MainActivity::class.java))
+                  finish()
+                  overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/amarjeet/motionspot/SplashIconView.kt')"
+          cat > 'app/src/main/java/com/amarjeet/motionspot/SplashIconView.kt' <<'EOF'
+          package com.amarjeet.motionspot
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.DashPathEffect
+          import android.graphics.Paint
+          import android.util.AttributeSet
+          import android.view.View
+          import kotlin.math.min
+
+          class SplashIconView @JvmOverloads constructor(
+              context: Context,
+              attrs: AttributeSet? = null
+          ) : View(context, attrs) {
+
+              private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeWidth = 2f
+                  color = Color.parseColor("#FF5A4F")
+              }
+              private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeWidth = 3f
+                  color = Color.parseColor("#5BD38A")
+                  pathEffect = DashPathEffect(floatArrayOf(7f, 5f), 0f)
+              }
+              private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.FILL
+                  color = Color.parseColor("#FF5A4F")
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  val s = min(width, height) / 220f
+                  val ox = (width - 220f * s) / 2f
+                  val oy = (height - 220f * s) / 2f
+                  canvas.save()
+                  canvas.translate(ox, oy)
+                  canvas.scale(s, s)
+
+                  ringPaint.alpha = 41
+                  canvas.drawCircle(110f, 110f, 102f, ringPaint)
+                  ringPaint.alpha = 82
+                  canvas.drawCircle(110f, 110f, 78f, ringPaint)
+                  ringPaint.alpha = 140
+                  canvas.drawCircle(110f, 110f, 54f, ringPaint)
+
+                  canvas.drawRoundRect(68f, 82f, 152f, 138f, 4f, 4f, boxPaint)
+
+                  dotPaint.alpha = 255
+                  canvas.drawCircle(126f, 108f, 8f, dotPaint)
+                  dotPaint.alpha = 128
+                  canvas.drawCircle(104f, 114f, 4f, dotPaint)
+                  dotPaint.alpha = 77
+                  canvas.drawCircle(90f, 119f, 2.5f, dotPaint)
+
+                  canvas.restore()
+              }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/drawable/badge_bg.xml')"
+          cat > 'app/src/main/res/drawable/badge_bg.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android"
+              android:shape="rectangle">
+              <solid android:color="#161B22" />
+              <stroke
+                  android:width="1dp"
+                  android:color="#2A313C" />
+              <corners android:radius="40dp" />
+          </shape>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/drawable/ic_truck.xml')"
+          cat > 'app/src/main/res/drawable/ic_truck.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="22dp"
+              android:height="20dp"
+              android:viewportWidth="22"
+              android:viewportHeight="20">
+              <path
+                  android:pathData="M1,4h11v10H1z"
+                  android:strokeColor="#5BD38A"
+                  android:strokeWidth="1.8"
+                  android:strokeLineCap="round"
+                  android:strokeLineJoin="round" />
+              <path
+                  android:pathData="M12,7h4l3,3.5V14h-7"
+                  android:strokeColor="#5BD38A"
+                  android:strokeWidth="1.8"
+                  android:strokeLineCap="round"
+                  android:strokeLineJoin="round" />
+              <path
+                  android:pathData="M3,16a2,2 0 1,0 4,0a2,2 0 1,0 -4,0"
+                  android:strokeColor="#5BD38A"
+                  android:strokeWidth="1.8" />
+              <path
+                  android:pathData="M13,16a2,2 0 1,0 4,0a2,2 0 1,0 -4,0"
+                  android:strokeColor="#5BD38A"
+                  android:strokeWidth="1.8" />
+          </vector>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/layout/activity_main.xml')"
+          cat > 'app/src/main/res/layout/activity_main.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#111111"
+              android:orientation="vertical">
+
+              <FrameLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1"
+                  android:background="#000000">
+
+                  <androidx.camera.view.PreviewView
+                      android:id="@+id/previewView"
+                      android:layout_width="match_parent"
+                      android:layout_height="match_parent" />
+
+                  <com.amarjeet.motionspot.BoxOverlayView
+                      android:id="@+id/overlay"
+                      android:layout_width="match_parent"
+                      android:layout_height="match_parent" />
+              </FrameLayout>
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:padding="14dp">
+
+                  <TextView
+                      android:id="@+id/status"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:text="Draw a box on the preview to choose the watch area"
+                      android:textColor="#FFFFFF"
+                      android:textSize="15sp" />
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="6dp"
+                      android:gravity="center_vertical"
+                      android:orientation="horizontal">
+
+                      <TextView
+                          android:layout_width="110dp"
+                          android:layout_height="wrap_content"
+                          android:text="Sensitivity"
+                          android:textColor="#CCCCCC" />
+
+                      <SeekBar
+                          android:id="@+id/sensitivityBar"
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:max="100"
+                          android:progress="60" />
+                  </LinearLayout>
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:gravity="center_vertical"
+                      android:orientation="horizontal">
+
+                      <TextView
+                          android:layout_width="110dp"
+                          android:layout_height="wrap_content"
+                          android:text="Siren volume"
+                          android:textColor="#CCCCCC" />
+
+                      <SeekBar
+                          android:id="@+id/volumeBar"
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:max="100"
+                          android:progress="100" />
+                  </LinearLayout>
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:gravity="center_vertical"
+                      android:orientation="horizontal">
+
+                      <TextView
+                          android:layout_width="110dp"
+                          android:layout_height="wrap_content"
+                          android:text="Auto-stop"
+                          android:textColor="#CCCCCC" />
+
+                      <Spinner
+                          android:id="@+id/timerSpinner"
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:entries="@array/timer_options" />
+                  </LinearLayout>
+
+                  <CheckBox
+                      android:id="@+id/saverCheck"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:checked="true"
+                      android:text="Save battery: hide preview and dim screen while watching"
+                      android:textColor="#CCCCCC"
+                      android:textSize="13sp" />
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="6dp"
+                      android:orientation="horizontal">
+
+                      <Button
+                          android:id="@+id/testButton"
+                          android:layout_width="0dp"
+                          android:layout_height="56dp"
+                          android:layout_marginEnd="8dp"
+                          android:layout_weight="1"
+                          android:text="Test siren" />
+
+                      <Button
+                          android:id="@+id/mainButton"
+                          android:layout_width="0dp"
+                          android:layout_height="56dp"
+                          android:layout_weight="1.4"
+                          android:text="Start watching"
+                          android:textColor="#FFFFFF" />
+                  </LinearLayout>
+              </LinearLayout>
+          </LinearLayout>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/layout/activity_splash.xml')"
+          cat > 'app/src/main/res/layout/activity_splash.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/splashRoot"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#0E1116"
+              android:gravity="center_horizontal"
+              android:orientation="vertical"
+              android:paddingStart="32dp"
+              android:paddingEnd="32dp"
+              android:paddingBottom="44dp">
+
+              <Space
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1" />
+
+              <com.amarjeet.motionspot.SplashIconView
+                  android:layout_width="210dp"
+                  android:layout_height="210dp" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="22dp"
+                  android:text="Motion Spot"
+                  android:textColor="#FFFFFF"
+                  android:textSize="38sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:text="Draw a box. Catch movement."
+                  android:textColor="#A8B0BC"
+                  android:textSize="16sp" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:background="@drawable/badge_bg"
+                  android:drawableStart="@drawable/ic_truck"
+                  android:drawablePadding="10dp"
+                  android:gravity="center_vertical"
+                  android:paddingStart="16dp"
+                  android:paddingTop="9dp"
+                  android:paddingEnd="16dp"
+                  android:paddingBottom="9dp"
+                  android:text="For Khorfakkan and Fujairah drivers"
+                  android:textColor="#E6EAF0"
+                  android:textSize="13sp" />
+
+              <Space
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Created by"
+                  android:textColor="#A8B0BC"
+                  android:textSize="13sp" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="6dp"
+                  android:text="ਤਜ਼ਰਬੇਕਾਰ"
+                  android:textColor="#FFFFFF"
+                  android:textSize="34sp"
+                  android:textStyle="bold" />
+
+              <View
+                  android:layout_width="56dp"
+                  android:layout_height="3dp"
+                  android:layout_marginTop="14dp"
+                  android:background="#FF5A4F" />
+          </LinearLayout>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/values-v31/themes.xml')"
+          cat > 'app/src/main/res/values-v31/themes.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="SplashTheme" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">#0E1116</item>
+                  <item name="android:windowSplashScreenBackground">#0E1116</item>
+              </style>
+          </resources>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/values/strings.xml')"
+          cat > 'app/src/main/res/values/strings.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Motion Spot</string>
+              <string-array name="timer_options">
+                  <item>No auto-stop</item>
+                  <item>1 hour</item>
+                  <item>2 hours</item>
+                  <item>4 hours</item>
+              </string-array>
+          </resources>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/res/values/themes.xml')"
+          cat > 'app/src/main/res/values/themes.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.NoActionBar" />
+
+              <style name="SplashTheme" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">#0E1116</item>
+              </style>
+          </resources>
+          EOF
+          mkdir -p "$(dirname 'build.gradle.kts')"
+          cat > 'build.gradle.kts' <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p "$(dirname 'gradle.properties')"
+          cat > 'gradle.properties' <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          mkdir -p "$(dirname 'settings.gradle.kts')"
+          cat > 'settings.gradle.kts' <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MotionSpot"
+          include(":app")
+          EOF
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk MotionSpot.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MotionSpot-APK
+          path: MotionSpot.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Motion Spot APK ${{ github.run_number }}
+          files: MotionSpot.apk
